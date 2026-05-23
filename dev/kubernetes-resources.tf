@@ -94,5 +94,5 @@ resource "null_resource" "goal_tracker_app" {
     command = "kubectl delete application 3tirewebapp-${self.triggers.environment} -n ${self.triggers.argocd_namespace} --ignore-not-found=true"
   }
 
-  depends_on = [helm_release.argocd]
+  depends_on = [helm_release.argocd, helm_release.istiod]
 }
