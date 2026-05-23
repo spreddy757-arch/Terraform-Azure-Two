@@ -1,0 +1,118 @@
+# Istio traffic policies for the 3-tier app: retries, timeouts, and circuit breaking.
+# These take effect only for traffic between sidecar-injected pods.
+#
+# To deploy, copy this file into the gitops-configs repo (3tire-configs/) and add it
+# to the resources list in kustomization.yaml so ArgoCD syncs it with the app.
+
+# =====================================================================
+# BACKEND (HTTP :8080) - called by the frontend
+# This is where retries/timeouts/circuit breaking matter most.
+# =====================================================================
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: backend
+spec:
+  hosts:
+    - backend
+  http:
+    - route:
+        - destination:
+            host: backend
+            port:
+              number: 8080
+      # Fail the whole request if it takes longer than this (including retries)
+      timeout: 10s
+      retries:
+        attempts: 3
+        perTryTimeout: 2s
+        # Retry only on conditions that are safe to retry (connection-level
+        # failures and 503s), not on every 5xx
+        retryOn: connect-failure,refused-stream,unavailable,cancelled,503
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: backend
+spec:
+  host: backend
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 100
+        maxRequestsPerConnection: 10
+    # Eject a backend pod from the load-balancing pool after repeated errors
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+
+# =====================================================================
+# POSTGRES (TCP :5432) - called by the backend
+# Plain TCP, so HTTP retries/timeouts do not apply. The connection pool
+# acts as a connection-level circuit breaker. Outlier detection is
+# omitted on purpose: with a single replica there is nothing to fail
+# over to, so ejecting the only host would just cause an outage.
+# =====================================================================
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: postgres
+spec:
+  host: postgres
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 50
+        connectTimeout: 5s
+
+# =====================================================================
+# FRONTEND (HTTP :3000) - exposed via LoadBalancer
+# NOTE: these policies only apply to callers inside the mesh. Traffic
+# arriving through the Azure LoadBalancer goes straight to the pods and
+# bypasses client-side routing, so this VirtualService has no effect on
+# external users until an Istio ingress gateway fronts the service.
+# Included for completeness / future ingress-gateway adoption.
+# =====================================================================
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+spec:
+  hosts:
+    - frontend
+  http:
+    - route:
+        - destination:
+            host: frontend
+            port:
+              number: 3000
+      timeout: 15s
+      retries:
+        attempts: 2
+        perTryTimeout: 5s
+        retryOn: connect-failure,refused-stream,unavailable,cancelled
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: frontend
+spec:
+  host: frontend
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 100
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
